@@ -35,6 +35,12 @@ Toàn bộ hệ thống backend sử dụng một file `.env` chung đặt tại
     ```
 3.  Mở file `.env` và xem lại các giá trị. Các giá trị mặc định đã được cấu hình để hoạt động với Docker Compose. Bạn không cần thay đổi gì ở bước này.
 
+
+
+
+
+
+
 ### Bước 3: Khởi chạy Hạ tầng với Docker Compose
 
 Lệnh sau sẽ khởi tạo tất cả các dịch vụ hạ tầng cần thiết trong các container Docker chạy nền:
