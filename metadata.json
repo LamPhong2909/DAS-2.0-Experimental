@@ -1,0 +1,6 @@
+{
+  "name": "DAS ",
+  "description": "An AI-powered dashboard to interact with and query the Data Augmentation & Synthesis (DAS) system.",
+  "requestFramePermissions": [],
+  "prompt": ""
+}
