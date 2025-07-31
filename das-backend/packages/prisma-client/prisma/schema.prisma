@@ -1,1 +1,111 @@
-ÿôáŠÇâ•è¬¶¬Šx%zÊ.­Ç¨~Úî¶è®Ø^u«Zm«
+// das-backend/packages/prisma-client/prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Core domain models
+model MediaItem {
+  id              String   @id @default(uuid())
+  sourceUrl       String
+  localPath       String
+  mimeType        String
+  fileSize        Int
+  width           Int?
+  height          Int?
+  pHash           String?  // Perceptual hash for duplicate detection
+  checksum        String   @unique
+  license         String?
+  tags            String[]
+  metadata        Json     // Flexible metadata storage
+  acquisitionJob  ScrapingJob? @relation(fields: [acquisitionJobId], references: [id])
+  acquisitionJobId String?
+  experiments     ExperimentMedia[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([pHash])
+  @@index([tags])
+  @@index([createdAt])
+}
+
+model ScrapingJob {
+  id              String   @id @default(uuid())
+  status          JobStatus @default(PENDING)
+  priority        Int      @default(5)
+  progress        Int      @default(0)
+  payload         Json     // ScrapeWebRequestDto
+  logs            String[]
+  errorMessage    String?
+  mediaItems      MediaItem[]
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Experiment {
+  id              String   @id @default(uuid())
+  name            String
+  description     String?
+  status          ExperimentStatus @default(PENDING)
+  configuration   Json     // Pipeline configuration
+  degradationManifest Json?  // Detailed augmentation parameters
+  mediaItems      ExperimentMedia[]
+  analysisResults AnalysisResult[]
+  createdBy       String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([status])
+  @@index([createdBy])
+}
+
+model ExperimentMedia {
+  id              String   @id @default(uuid())
+  experiment      Experiment @relation(fields: [experimentId], references: [id])
+  experimentId    String
+  originalMedia   MediaItem @relation(fields: [originalMediaId], references: [id])
+  originalMediaId String
+  processedPath   String   // Path to augmented version
+  degradations    Json     // Applied transformations
+  createdAt       DateTime @default(now())
+  
+  @@unique([experimentId, originalMediaId])
+}
+
+model AnalysisResult {
+  id              String   @id @default(uuid())
+  experiment      Experiment @relation(fields: [experimentId], references: [id])
+  experimentId    String
+  modelName       String   // e.g., "YOLOv12"
+  modelVersion    String
+  metrics         Json     // mAP, F1, precision, recall, etc.
+  insights        Json     // Auto-detected weaknesses
+  timestamp       DateTime @default(now())
+  
+  @@index([experimentId, modelName])
+}
+
+enum JobStatus {
+  PENDING
+  ACTIVE
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum ExperimentStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}

@@ -1,89 +1,137 @@
+// das-backend/apps/dam-service/src/jobs/scraping.processor.ts
 import { Process, Processor } from '@nestjs/bullmq/dist/decorators';
 import { Job } from 'bullmq';
 import { Logger } from '@nestjs/common';
 import { ScrapeWebRequestDto } from '@das/common-dtos';
 import { PrismaService } from '@das/prisma-client';
-// import { chromium } from 'playwright'; // Sẽ được sử dụng trong logic thực tế
+import { WebScraperService } from '../crawlers/web-scraper.service';
+import { SyntheticDataService } from '../generators/synthetic-data.service';
 
-/**
- * @class ScrapingProcessor
- * @description Worker xử lý các job trong hàng đợi 'scraping-queue'.
- */
 @Processor('scraping-queue')
 export class ScrapingProcessor {
   private readonly logger = new Logger(ScrapingProcessor.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly webScraper: WebScraperService,
+    private readonly syntheticData: SyntheticDataService,
+  ) {}
 
-  /**
-   * @method handleScrapeWeb
-   * @description Xử lý một job 'scrape-web' từ hàng đợi.
-   */
   @Process({ name: 'scrape-web', concurrency: 5 })
   async handleScrapeWeb(job: Job<ScrapeWebRequestDto>) {
-    this.logger.log(`Processing job: ${job.id}`);
-    await this.prisma.scrapingJob.update({
-        where: { id: job.id },
-        data: { status: 'ACTIVE' },
-    });
+    this.logger.log(`Starting job ${job.id} with ${job.data.urls.length} URLs`);
+    
+    await this.updateJobStatus(job.id!, 'ACTIVE');
 
     try {
+      await this.webScraper.initialize();
+      
+      const allMediaItems = [];
       const totalUrls = job.data.urls.length;
-      let processedCount = 0;
 
-      for (const url of job.data.urls) {
-        await this.scrapeSingleUrl(url, job.data.rules, job);
-        processedCount++;
-        const progress = Math.round((processedCount / totalUrls) * 100);
-        await job.updateProgress(progress);
-        await this.prisma.scrapingJob.update({
-            where: { id: job.id },
-            data: { progress },
-        });
+      for (let i = 0; i < totalUrls; i++) {
+        const url = job.data.urls[i];
+        
+        try {
+          this.logger.log(`Scraping URL ${i + 1}/${totalUrls}: ${url}`);
+          
+          const mediaItems = await this.webScraper.scrapeUrl(
+            url,
+            job.data.rules.selector,
+            job.data.rules.depth || 1,
+            job.id!,
+          );
+
+          allMediaItems.push(...mediaItems);
+          
+          // Update progress
+          const progress = Math.round(((i + 1) / totalUrls) * 100);
+          await job.updateProgress(progress);
+          await this.updateJobProgress(job.id!, progress);
+
+          // Log progress
+          await this.appendJobLog(job.id!, `Scraped ${url}: Found ${mediaItems.length} images`);
+
+        } catch (error) {
+          this.logger.error(`Failed to scrape ${url}:`, error);
+          await this.appendJobLog(job.id!, `ERROR: Failed to scrape ${url}: ${error.message}`);
+        }
+
+        // Rate limiting
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
 
-      await this.prisma.scrapingJob.update({
-        where: { id: job.id },
-        data: { status: 'COMPLETED' },
+      // Mark job as completed
+      await this.updateJobStatus(job.id!, 'COMPLETED', {
+        completedAt: new Date(),
+        logs: [`Successfully scraped ${allMediaItems.length} images from ${totalUrls} URLs`],
       });
-      this.logger.log(`Job ${job.id} completed.`);
-      return { message: `Successfully scraped ${totalUrls} URLs.` };
+
+      this.logger.log(`Job ${job.id} completed. Total images: ${allMediaItems.length}`);
+      
+      return {
+        jobId: job.id,
+        totalImages: allMediaItems.length,
+        urls: job.data.urls,
+      };
+
     } catch (error) {
-      this.logger.error(`Job ${job.id} failed: ${error.message}`, error.stack);
-      await this.prisma.scrapingJob.update({
-        where: { id: job.id },
-        data: { status: 'FAILED' },
+      this.logger.error(`Job ${job.id} failed:`, error);
+      
+      await this.updateJobStatus(job.id!, 'FAILED', {
+        errorMessage: error.message,
+        completedAt: new Date(),
       });
+
+      throw error;
+    } finally {
+      await this.webScraper.destroy();
+    }
+  }
+
+  @Process({ name: 'generate-synthetic', concurrency: 2 })
+  async handleGenerateSynthetic(job: Job<any>) {
+    // Implementation for synthetic data generation
+    this.logger.log(`Generating synthetic data for job ${job.id}`);
+    
+    try {
+      const result = await this.syntheticData.generateImages(job.data);
+      return result;
+    } catch (error) {
+      this.logger.error(`Synthetic generation failed:`, error);
       throw error;
     }
   }
 
-  private async scrapeSingleUrl(url: string, rules: any, job: Job) {
-    this.logger.debug(`[Job ${job.id}] Scraping URL: ${url}`);
-    
-    // --- NƠI TÍCH HỢP LOGIC THỰC TẾ ---
-    // 1. Khởi tạo Playwright browser
-    // const browser = await chromium.launch();
-    // const page = await browser.newPage();
-    // await page.goto(url);
-
-    // 2. Sử dụng `rules.selector` để trích xuất dữ liệu
-    // const imageUrls = await page.$$eval(rules.selector, imgs => imgs.map(img => img.src));
-    
-    // 3. Với mỗi ảnh:
-    //    a. Download ảnh.
-    //    b. Tạo pHash, lấy dimensions, tính checksum.
-    //    c. Upload ảnh vào MinIO.
-    //    d. Tạo "Golden Record" trong CSDL (model MediaItem).
-    
-    // 4. Đóng browser
-    // await browser.close();
-
+  private async updateJobStatus(jobId: string, status: string, additionalData?: any) {
     await this.prisma.scrapingJob.update({
-      where: { id: job.id },
-      data: { logs: { push: `Scraped ${url}` } },
+      where: { id: jobId },
+      data: {
+        status: status as any,
+        ...additionalData,
+      },
+    });
+  }
+
+  private async updateJobProgress(jobId: string, progress: number) {
+    await this.prisma.scrapingJob.update({
+      where: { id: jobId },
+      data: { progress },
+    });
+  }
+
+  private async appendJobLog(jobId: string, log: string) {
+    const job = await this.prisma.scrapingJob.findUnique({
+      where: { id: jobId },
     });
 
-    await new Promise(resolve => setTimeout(resolve, 1500)); // Giả lập tác vụ scraping
+    if (job) {
+      await this.prisma.scrapingJob.update({
+        where: { id: jobId },
+        data: {
+          logs: [...job.logs, `[${new Date().toISOString()}] ${log}`],
+        },
+      });
+    }
   }
 }
